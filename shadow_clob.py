@@ -146,8 +146,10 @@ class ShadowCLOB:
         min_shares = float(d.get("min_order_size") or 0.0)
         if not asks:
             raise ValueError("shadow adaptive order has no current ask")
-        if requested + 1e-9 < min_shares:
-            raise ValueError("shadow adaptive order below market minimum")
+        # Shadow mode is a research execution model, not an authenticated CLOB
+        # order. Preserve the strategy's exact dollar/share allocation even when
+        # the public market reports a larger exchange minimum. The visible ask
+        # price/size still constrains what can actually be simulated as filled.
 
         remaining = requested
         fills = []
