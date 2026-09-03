@@ -10,7 +10,7 @@ from paper_ledger import PaperLedger
 from live_ledger import LiveLedger
 from live_risk import LiveRisk
 from live_execution import LiveExecutionQueue
-from clob_adaptive import CLOBAdaptivePlanner
+from clob_adaptive import CLOBAdaptivePlanner, AdaptivePlan
 from shadow_clob import ShadowCLOB
 from research_logger import ResearchLogger
 from strategy import CapitalFirstStrategy
@@ -101,6 +101,14 @@ if EXECUTION_MODE:
     execution_queue = LiveExecutionQueue(DATA / ("live_execution_queue.json" if LIVE else "shadow_execution_queue.json"))
     if SHADOW:
         live = ShadowCLOB(DATA / "shadow_clob.json")
+        # Shadow execution has no real-money orders. A previous transient loop
+        # error must not poison every Railway restart forever. Preserve a real
+        # daily-loss halt and corrupt-state halt; clear only operational halts.
+        if risk.halted and risk.halt_reason not in {"DAILY_LOSS_CAP", "CORRUPT_RISK_STATE"}:
+            p(f"SHADOW RISK RESET | clearing stale halt={risk.halt_reason}")
+            risk.halted = False
+            risk.halt_reason = ""
+            risk._save()
 else:
     ledger = PaperLedger(DATA / "paper_state.json", strategy.bankroll)
     risk = None
@@ -886,6 +894,31 @@ def main():
                             group_items, current_ask=current_ask, min_shares=min_shares,
                             tick_size=tick, now=now
                         )
+                        if plan is None and SHADOW:
+                            # Public shadow execution models the strategy's observed
+                            # notional directly. Do not let the exchange's minimum
+                            # order size suppress a valid V15.2 strategy allocation;
+                            # actual visible ask liquidity still limits the fill.
+                            shadow_item = next(
+                                (x for x in group_items if str(x.get("meta", {}).get("signal_key", "")) == signal_key),
+                                group_items[0] if group_items else None,
+                            )
+                            if shadow_item is not None:
+                                shadow_budget = min(float(shadow_item.get("notional", notion)), risk.max_order)
+                                if shadow_budget > 1e-12:
+                                    plan = AdaptivePlan(
+                                        items=(shadow_item,),
+                                        execution_price=float(current_ask),
+                                        requested_budget=shadow_budget,
+                                        order_shares=shadow_budget / float(current_ask),
+                                        min_order_cost=float(current_ask) * float(min_shares),
+                                        min_shares=float(min_shares),
+                                        topup=0.0,
+                                        max_execution_price=0.999999,
+                                    )
+                                    p(f"CLOB IMMEDIATE ASK | asset={market['asset']} | side={signal.side} "
+                                      f"| signal=${signal.price:.4f} | ask=${float(current_ask):.4f} | budget=${shadow_budget:.4f} "
+                                      f"| reason=SHADOW_SUBMIN_STRATEGY_LOT")
                         if plan is None:
                             p(f"CLOB IMMEDIATE ASK WAIT | asset={market['asset']} | side={signal.side} "
                               f"| signal=${notion:.4f} | bid=${signal.price:.4f} | ask={current_ask!r} "
@@ -1082,19 +1115,27 @@ def main():
             consecutive_errors += 1
             p(f"LOOP ERROR | {type(exc).__name__}: {exc}")
             traceback.print_exc()
-            if realistic_simulator is not None:
-                try: realistic_simulator.stop()
-                except Exception: pass
-            if EXECUTION_MODE:
+            if LIVE:
+                if realistic_simulator is not None:
+                    try: realistic_simulator.stop()
+                    except Exception: pass
                 try: risk.halt(f"LOOP_ERROR:{type(exc).__name__}")
                 except Exception: pass
                 try: live.cancel_all()
                 except Exception: pass
                 raise RuntimeError("LIVE SAFETY STOP: unexpected live-path exception") from exc
-            if consecutive_errors >= 10:
+            # Shadow mode has no authenticated orders and must recover from a
+            # transient REST/WebSocket/data error instead of crash-looping Railway.
+            if realistic_simulator is not None and consecutive_errors >= 5:
+                try:
+                    realistic_simulator.start()
+                except Exception:
+                    pass
+            if consecutive_errors >= 10 and not SHADOW:
                 raise
             time.sleep(2)
 
 
 if __name__ == "__main__":
     main()
+
