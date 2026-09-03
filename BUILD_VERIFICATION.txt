@@ -1,0 +1,17 @@
+V15.2 IMMEDIATE-ASK FINAL BUILD
+
+Validation:
+- pytest: 93 passed
+- compileall: PASS
+- shadow-mode import smoke test: PASS
+- PAPER_TRADING=true / LIVE_TRADING=false / SHADOW_CLOB=true: PASS
+
+Protected hashes:
+strategy.py 6121c88b006afa97c4636b87a97c00ee6f82b2aa266afdd462d5a33d2d1c2003
+trader_behavior.json 576deebee751f24a363289ef142aad327d26264bbb4b7f28d76aeb42b487c685
+
+Execution behavior:
+Immediate current-ask FAK simulation; no wait for signal price to be reached.
+Strategy fine-band/capital allocation remains the V15.2 reference distribution.
+FAK unmatched remainder is canceled, so it is never held as a phantom reservation.
+Resting-maker realistic fill remains available as an independent diagnostic path.
